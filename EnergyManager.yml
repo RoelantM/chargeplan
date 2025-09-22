@@ -1,0 +1,172 @@
+alias: Energy Manager
+description: This energy manager is managing the batteries and car battery
+triggers:
+  - trigger: time_pattern
+    seconds: /30
+conditions: []
+actions:
+  - variables:
+      force_discharge_w_epex: 15000
+      force_charge_w_epex: -15000
+      ev_power: "{{ (states('sensor.ehpcdvnk_power') | float(0) * 1000) | round(0) }}"
+      ev_status: "{{ states('sensor.ehpcdvnk_status') }}"
+      ev_connected: >-
+        {{ ev_status in ['connected', 'awaiting_start', 'ready_to_charge',
+        'charging'] }}
+      ev_priority_threshold: "{{ states('input_number.ev_priority_threshold') | float(0) }}"
+      p1_power: "{{ states('sensor.p1_meter_power') | float(0) }}"
+      pv_power: "{{ states('sensor.alphaess_active_power_pv_meter') | float(0) }}"
+      alpha_power: "{{ states('sensor.alphaess_power_battery') | float(0) }}"
+      overall_soc: "{{ states('sensor.overall_battery_soc') | float(0) }}"
+      victron_setpoint: "{{ states('number.victron_settings_ess_acpowersetpoint') | float(0) }}"
+      victron_acout: "{{ states('sensor.victron_system_consumption_l1') | float(0) }}"
+      total_battery_power: "{{ states('sensor.total_battery_power') | float(0) }}"
+      intent_value: "{{ p1_power - ev_power + total_battery_power }}"
+      now_compact_date: "{{ now().astimezone().strftime('%y%m%d') | string }}"
+      now_hour: "{{ now().astimezone().hour | int }}"
+      schedule_raw: "{{ states('input_text.epex_plan_compact') | string }}"
+      schedule_action: >-
+        {% set entries = (schedule_raw | trim).split(';') if schedule_raw else
+        [] %} {% set ymd = now_compact_date |string %} {% set hh  = now_hour |
+        int %} {% set return = namespace(act='none') %} {% for e in entries %}
+          {% set e = e | trim %}
+          {% if e|length >= 12 and ymd == e[0:6] |string %}
+            {% set h1 = e[6:8] | int %}
+            {% set h2 = e[9:11] | int %}
+            {% set A  = e[11] %}
+            {% if hh >= h1 and hh < h2 %}
+              {% set return.act = 
+                    'C' if A == 'C' 
+                    else ('D' if A == 'D' 
+                    else ('E' if A == 'E' 
+                    else 'unknown')) %}
+              {% break %}
+            {% endif %}
+          {% endif %}
+        {% endfor %} {{ return.act }}
+      schedule_override: "{{ schedule_action in ['C', 'D', 'E'] }}"
+      schedule_override_action: |-
+        {% if schedule_action == 'C' %}
+          charge
+        {% elif schedule_action == 'D' %}
+          discharge
+        {% elif schedule_action == 'E' %}
+          explicit
+        {% else %}
+          none
+        {% endif %}
+      epex_enabled: "{{ is_state('input_boolean.epex_enabled','on') }}"
+      intent: |-
+        {% if intent_value > 50 %}
+          discharge
+        {% elif intent_value < -50 %}
+          charge
+        {% else %}
+          none
+        {% endif %}
+      should_discharge: |-
+        {{ intent == 'discharge' and (overall_soc > 11) and
+           (states(ev_status) | lower != 'charging' ) and 
+           alpha_power >= 0 }}
+      should_charge: >-
+        {{ intent == 'charge' and (overall_soc < 100) and (alpha_power >= 0 or
+        p1_power < -100) }}
+      no_action: >-
+        {{ intent == 'none' or (intent == 'charge' and not should_charge) or
+        (intent == 'discharge' and not should_discharge) }}
+      manager_request_w: |-
+        {% set base = intent_value %} 
+        {% if schedule_override and epex_enabled %}
+          {% if schedule_override_action == 'charge' %}
+            {{ force_charge_w_epex }}
+          {% elif schedule_override_action == 'discharge' %}
+            {{ force_discharge_w_epex }}
+          {% else %}
+            {{ intent_value }}
+          {% endif %}
+        {% else %}
+          {{ base }}
+        {% endif %}
+      ev_request_w: |-
+        {% if manager_request_w < 0 and ev_connected %}
+          {{ [manager_request_w | abs, ev_priority_threshold] | min }}
+        {% else %}
+          0
+        {% endif %}        
+      battery_request_w: |-
+        {% if manager_request_w < 0 %}
+          {% if ev_connected and ev_priority_threshold > 0 %}
+            {% set ev_w = [manager_request_w | abs, ev_priority_threshold] | min %}
+          {% else %}
+            {% set ev_w = 0 %}
+          {% endif %}
+          {{ manager_request_w + ev_w }}
+        {% else %}
+          {{ manager_request_w }}
+        {% endif %}
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ (not no_action or schedule_override) and
+              schedule_override_action != 'explicit' }}
+            alias: Manager will act
+        sequence:
+          - alias: Control Marstek Batteries
+            action: script.marstek_apply_order
+            data:
+              desired_w: "{{ battery_request_w }}"
+            response_variable: marstek
+          - alias: Control Victron Batteries
+            action: script.victron_worker
+            data:
+              desired_w: "{{ marstek.leftover_w | float(0) }}"
+            response_variable: victron
+          - alias: Worker → EV Charger
+            action: script.ev_charger_worker
+            data:
+              watt: "{{ ev_request_w + victron.leftover_w | float(0) }}"
+              epex_force: epex_override
+            response_variable: charger
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: >
+                      {{ schedule_override_action == 'charge' and (alpha_power |
+                      float(0) <= 0) }}
+                sequence:
+                  - target:
+                      entity_id: input_button.alphaess_helper_force_charge
+                    action: input_button.press
+                    data: {}
+              - conditions:
+                  - condition: template
+                    value_template: >
+                      {{ schedule_override_action == 'discharge' and
+                      (alpha_power | float(0) >= 0) }}
+                sequence:
+                  - target:
+                      entity_id: input_button.alphaess_helper_force_discharge
+                    action: input_button.press
+                    data: {}
+            default: []
+    default:
+      - alias: Stop Marstek Batteries
+        action: script.marstek_apply_order
+        data:
+          desired_w: 0
+      - alias: Stop Victron Batteries
+        action: script.victron_worker
+        data:
+          desired_w: 0
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ schedule_override_action != 'explicit' }}"
+            sequence:
+              - alias: Worker → EV Charger
+                action: script.ev_charger_worker
+                data:
+                  watt: 0
+                response_variable: charger
+        default: []
