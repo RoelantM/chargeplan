@@ -1,3 +1,5 @@
+**LET OP: ik zie dat vandaag het niet goed werkt. geen pairs worden gebouwd. Ben er mee bezig**
+
 # Home Assistant – EPEX Trading with Frank Energie
 
 This repository contains configuration examples and dashboards for integrating **EPEX trading logic** into Home Assistant, using **Frank Energie dynamic pricing**.
