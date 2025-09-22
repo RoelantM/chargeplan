@@ -23,73 +23,87 @@ sequence:
           }] %}
         {% endfor %} {{ ns.out }}
       day_pairs: >
-        {% if not day_enabled %}{{ [] }}{% else %} {% set day_prices =
-        prices_norm
-             | selectattr('from','defined')
-             | selectattr('till','defined')
-             | selectattr('price','defined')
-             | list %}
-        {% set day_prices = day_prices
-             | selectattr('from','string')
-             | list %}
-        {% set day = namespace(list=[]) %} {% for p in day_prices %}
-          {% set f = as_datetime(p.from) %}
+        {% if not day_enabled %}{{ [] }}{% else %}
+        {% set all = prices_norm | list %}
+        {# --- SELL candidates: daytime 10:00–22:00 --- #}
+        {% set sells = namespace(list=[]) %}
+        {% for p in all %}
+          {% set f = as_datetime(p['from']) %}
           {% if 10 <= f.hour < 22 %}
-            {% set day.list = day.list + [p] %}
+            {% set sells.list = sells.list + [p] %}
           {% endif %}
-        {% endfor %} {% set day_sorted = day.list | sort(attribute='price',
-        reverse=true) %} {% set top_sells = day_sorted[:max_discharge_hours] %}
-        {% set out = namespace(pairs=[]) %} {% for s in top_sells %}
-          {% set s_from = as_datetime(s.from) %}
-          {% set candidates = day.list
-               | selectattr('till','<=', s.from)
-               | list %}
-          {% if candidates|count > 0 %}
-            {% set cheapest = (candidates | sort(attribute='price'))[0] %}
-            {% set spread = (s.price|float(0)) - (cheapest.price|float(0)) %}
-            {% if spread >= min_spread %}
-              {% set out.pairs = out.pairs + [{
-                'buy_from': cheapest.from, 'buy_till': cheapest.till, 'buy_price': cheapest.price|float,
-                'sell_from': s.from, 'sell_till': s.till, 'sell_price': s.price|float,
-                'spread': spread
-              }] %}
-            {% endif %}
+        {% endfor %}
+        {# take the top N sells by price #}
+        {% set top_sells = (sells.list | sort(attribute='price', reverse=true))[:max_discharge_hours] %}
+        {% set out = namespace(pairs=[]) %}
+        {% for s in top_sells %}
+          {% set s_from = as_datetime(s['from']) %}
+          {% set s_hour = s_from.hour %}
+          {% if s_hour >= 16 %}
+            {% set buy_start = (s_from - timedelta(days=1)).replace(hour=22, minute=0, second=0, microsecond=0) %}
+          {% else %}
+            {% set buy_start = s_from.replace(hour=0, minute=0, second=0, microsecond=0) %}
           {% endif %}
-        {% endfor %} {{ out.pairs | sort(attribute='spread', reverse=true) }} {%
-        endif %}
-      night_pairs: >
-        {% if not night_enabled %}{{ [] }}{% else %} {% set all = prices_norm %}
-        {% set morning = namespace(sells=[]) %} {% for p in all %}
-          {% set f = as_datetime(p.from) %}
-          {% if 7 <= f.hour < 10 %}
-            {% set morning.sells = morning.sells + [p] %}
-          {% endif %}
-        {% endfor %} {% set top_morning = (morning.sells |
-        sort(attribute='price', reverse=true))[:max_discharge_hours] %} {% set
-        out = namespace(pairs=[]) %} {% for s in top_morning %}
-          {% set s_from_dt = as_datetime(s.from) %}
-          {% set night_start_dt = (s_from_dt - timedelta(days=1)).replace(hour=22, minute=0, second=0, microsecond=0) %}
-          {% set buy_candidates = [] %}
+          {% set candidates = namespace(list=[]) %}
           {% for b in all %}
-            {% set b_from_dt = as_datetime(b.from) %}
-            {% set b_till_dt = as_datetime(b.till) %}
-            {% if b_from_dt >= night_start_dt and b_till_dt <= s_from_dt %}
-              {% set buy_candidates = buy_candidates + [b] %}
+            {% set b_from = as_datetime(b['from']) %}
+            {% set b_till = as_datetime(b['till']) %}
+            {% if b_from >= buy_start and b_till <= s_from %}
+              {% set candidates.list = candidates.list + [b] %}
             {% endif %}
           {% endfor %}
-          {% if buy_candidates|count > 0 %}
-            {% set cheapest = (buy_candidates | sort(attribute='price'))[0] %}
-            {% set spread = (s.price|float(0)) - (cheapest.price|float(0)) %}
+          {% if candidates.list|count > 0 %}
+            {% set cheapest = (candidates.list | sort(attribute='price'))[0] %}
+            {% set spread = (s['price']|float(0)) - (cheapest['price']|float(0)) %}
             {% if spread >= min_spread %}
               {% set out.pairs = out.pairs + [{
-                'buy_from': cheapest.from, 'buy_till': cheapest.till, 'buy_price': cheapest.price|float,
-                'sell_from': s.from, 'sell_till': s.till, 'sell_price': s.price|float,
+                'buy_from': cheapest['from'], 'buy_till': cheapest['till'], 'buy_price': cheapest['price']|float,
+                'sell_from': s['from'],       'sell_till': s['till'],       'sell_price': s['price']|float,
                 'spread': spread
               }] %}
             {% endif %}
           {% endif %}
-        {% endfor %} {{ out.pairs | sort(attribute='spread', reverse=true) }} {%
-        endif %}
+        {% endfor %}
+        {{ out.pairs | sort(attribute='spread', reverse=true) }}
+        {% endif %}
+      
+      night_pairs: >
+        {% if not night_enabled %}{{ [] }}{% else %}
+        {% set all = prices_norm | list %}
+        {% set morning = namespace(list=[]) %}
+        {% for p in all %}
+          {% set f = as_datetime(p['from']) %}
+          {% if 7 <= f.hour < 10 %}
+            {% set morning.list = morning.list + [p] %}
+          {% endif %}
+        {% endfor %}
+        {% set top_morning = (morning.list | sort(attribute='price', reverse=true))[:max_discharge_hours] %}
+        {% set out = namespace(pairs=[]) %}
+        {% for s in top_morning %}
+          {% set s_from = as_datetime(s['from']) %}
+          {% set buy_start = (s_from - timedelta(days=1)).replace(hour=22, minute=0, second=0, microsecond=0) %}
+          {% set candidates = namespace(list=[]) %}
+          {% for b in all %}
+            {% set b_from = as_datetime(b['from']) %}
+            {% set b_till = as_datetime(b['till']) %}
+            {% if b_from >= buy_start and b_till <= s_from %}
+              {% set candidates.list = candidates.list + [b] %}
+            {% endif %}
+          {% endfor %}
+          {% if candidates.list|count > 0 %}
+            {% set cheapest = (candidates.list | sort(attribute='price'))[0] %}
+            {% set spread = (s['price']|float(0)) - (cheapest['price']|float(0)) %}
+            {% if spread >= min_spread %}
+              {% set out.pairs = out.pairs + [{
+                'buy_from': cheapest['from'], 'buy_till': cheapest['till'], 'buy_price': cheapest['price']|float,
+                'sell_from': s['from'],       'sell_till': s['till'],       'sell_price': s['price']|float,
+                'spread': spread
+              }] %}
+            {% endif %}
+          {% endif %}
+        {% endfor %}
+        {{ out.pairs | sort(attribute='spread', reverse=true) }}
+        {% endif %}
       top_pairs: >
         {% set merged = (day_pairs + night_pairs) | sort(attribute='spread',
         reverse=true) %} {% set chosen = namespace(list=[]) %} {% for p in
