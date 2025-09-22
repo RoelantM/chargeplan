@@ -203,4 +203,11 @@ series:
 Use the same structure, but replace epex_plan_compact_parsed with epex_plan_proposed_compact_parsed.
 
 **Expex Build Plan**  
-Is getting the attributes from Frank Energy:
+Is getting the attributes from Frank Energy:  
+<img width="1116" height="802" alt="image" src="https://github.com/user-attachments/assets/b9eac79c-734f-4396-a490-9fb1f950afa3" />  
+
+These values are being used to build pairs. Now we are dividing it into 2 blocks, night (starting 2200) till 10.00, and from 10.00 till 22.00. I was working on fully automatic of getting a better spread, but wasn't properly working. This is WIP and obviously should be used at own risk ;)
+
+
+## 6. Energy Manager
+After the compact value has been created it doesn't work out of the box obviously. I have built my own automation, trigger on /30 seconds. This will probably be different for every user depending on the sensors they have. I will put in mine here (and is already changed 20 times), see EnergyManager.yml. (still WIP, but you get the point)
